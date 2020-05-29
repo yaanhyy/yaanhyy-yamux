@@ -118,11 +118,11 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>Session<S> {
 }
 
 #[test]
-fn yamux_client_test() {
+fn yamux_server_test() {
     async_std::task::block_on(async move {
         let listener = async_std::net::TcpListener::bind("127.0.0.1:8980").await.unwrap();
         let connec = listener.accept().await.unwrap().0;
-        let mut session = Session::new(connec, Config::default(), Mode::Client);
+        let mut session = Session::new(connec, Config::default(), Mode::Server);
         let stream = session.open_stream().await;
 
         if let Ok(mut stream) = stream {
@@ -144,7 +144,7 @@ fn yamux_client_test() {
 }
 
 #[test]
-fn yamux_server_test() {
+fn yamux_client_test() {
     async_std::task::block_on(async move {
         let connec = async_std::net::TcpStream::connect("127.0.0.1:8980").await.unwrap();
         let mut session = Session::new(connec, Config::default(), Mode::Client);
