@@ -4,8 +4,8 @@ use std::{convert::TryInto, num::TryFromIntError};
 /// A Yamux message frame consisting of header and body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    header: Header,
-    body: Vec<u8>
+    pub header: Header,
+    pub body: Vec<u8>
 }
 
 impl Frame {

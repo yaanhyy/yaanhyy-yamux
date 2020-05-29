@@ -1,8 +1,9 @@
 use super::session::Id;
-use super::header::{StreamId};
+use super::header::{StreamId, Header};
 use super::frame::{Frame};
 use super::Config;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
+
 
 /// The state of a Yamux stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -42,4 +43,57 @@ pub struct Stream {
     config: Arc<Config>,
     pending: Option<Frame>,
     flag: Flag,
+}
+
+impl Stream {
+    pub fn new
+    (id: StreamId, conn: Id, config: Arc<Config>, window: u32, credit: u32) -> Self
+    {
+        Stream {
+            id,
+            conn,
+            config,
+            pending: None,
+            flag: Flag::None,
+        }
+    }
+
+    /// Get this stream's identifier.
+    pub fn id(&self) -> StreamId {
+        self.id
+    }
+
+    /// Set the flag that should be set on the next outbound frame header.
+    pub(crate) fn set_flag(&mut self, flag: Flag) {
+        self.flag = flag
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        Stream {
+            id: self.id,
+            conn: self.conn,
+            config: self.config.clone(),
+
+            pending: None,
+            flag: self.flag,
+
+        }
+    }
+
+
+
+    /// Set ACK or SYN flag if necessary.
+    fn add_flag(&mut self, header: &mut Header) {
+        match self.flag {
+            Flag::None => (),
+            Flag::Syn => {
+                header.syn();
+                self.flag = Flag::None
+            }
+            Flag::Ack => {
+                header.ack();
+                self.flag = Flag::None
+            }
+        }
+    }
 }

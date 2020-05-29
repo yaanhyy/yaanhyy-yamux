@@ -1,7 +1,9 @@
-use crate::header::{Header, StreamId};
-use super::Config;
+use crate::header::{Header, StreamId, encode};
+use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
+use crate::stream::{self, Stream};
+use crate::frame::Frame;
 
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -28,7 +30,7 @@ enum Shutdown {
 ///
 /// Randomly generated, this is mainly intended to improve log output.
 #[derive(Clone, Copy)]
-pub(crate) struct Id(u32);
+pub struct Id(u32);
 
 impl Id {
     /// Create a random connection ID.
@@ -76,4 +78,93 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>Session<S> {
             is_closed: false
         }
     }
+
+    fn next_stream_id(&mut self) -> Result<StreamId, String> {
+        let proposed = StreamId::new(self.next_id);
+        self.next_id = self.next_id + 2;
+        match self.mode {
+            Mode::Client => assert!(proposed.is_client()),
+            Mode::Server => assert!(proposed.is_server())
+        }
+        Ok(proposed)
+    }
+
+    pub async fn open_stream(&mut self) -> Result<Stream, String> {
+        let id = self.next_stream_id()?;
+
+        if !self.config.lazy_open {
+            let mut frame = Frame::window_update(id, self.config.receive_window);
+            frame.header_mut().syn();
+            println!("{}: sending initial {:?}", self.id.0, frame.header());
+            let header = encode(&frame.header);
+            let res = self.socket.write_all(&header).await;
+            if let Ok(_) = res {
+                self.socket.write_all(&frame.body).await;
+            }
+        }
+
+        let stream = {
+            let config = self.config.clone();
+            let window = self.config.receive_window;
+            let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT);
+            if self.config.lazy_open {
+                stream.set_flag(stream::Flag::Syn)
+            }
+            stream
+        };
+
+        Ok(stream)
+    }
+}
+
+#[test]
+fn yamux_client_test() {
+    async_std::task::block_on(async move {
+        let listener = async_std::net::TcpListener::bind("127.0.0.1:8980").await.unwrap();
+        let connec = listener.accept().await.unwrap().0;
+        let mut session = Session::new(connec, Config::default(), Mode::Client);
+        let stream = session.open_stream().await;
+
+        if let Ok(mut stream) = stream {
+            let id = stream.id();
+            let mut msg = "ok".to_string();
+
+//            let len = msg.len();
+//            stream.write_all(msg.as_bytes()).await.unwrap();
+//            println!("C: {}: sent {} bytes", id, len);
+//            stream.close().await.unwrap();
+//            let mut data = Vec::new();
+//            stream.read_to_end(&mut data).await.unwrap();
+//            println!("C: {}: received {} bytes,{:?}", id, data.len(), data);
+            // result.push(data)
+        } else {
+            println!("open_stream fail" );
+        }
+    });
+}
+
+#[test]
+fn yamux_server_test() {
+    async_std::task::block_on(async move {
+        let connec = async_std::net::TcpStream::connect("127.0.0.1:8980").await.unwrap();
+        let mut session = Session::new(connec, Config::default(), Mode::Client);
+        let stream = session.open_stream().await;
+
+        if let Ok(mut stream) = stream {
+            let id = stream.id();
+            let mut msg = "ok".to_string();
+
+//            let len = msg.len();
+//            stream.write_all(msg.as_bytes()).await.unwrap();
+//            println!("C: {}: sent {} bytes", id, len);
+//            stream.close().await.unwrap();
+//            let mut data = Vec::new();
+//            stream.read_to_end(&mut data).await.unwrap();
+//            println!("C: {}: received {} bytes,{:?}", id, data.len(), data);
+            // result.push(data)
+        } else {
+            println!("open_stream fail" );
+        }
+        loop {}
+    });
 }

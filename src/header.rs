@@ -152,6 +152,26 @@ impl Header {
             length: code,
         }
     }
+
+    /// Set the [`SYN`] flag.
+    pub fn syn(&mut self) {
+        self.flags.0 |= SYN.0
+    }
+
+    /// Set the [`ACK`] flag.
+    pub fn ack(&mut self) {
+        self.flags.0 |= ACK.0
+    }
+
+    /// Set the [`FIN`] flag.
+    pub fn fin(&mut self) {
+        self.flags.0 |= FIN.0
+    }
+
+    /// Set the [`RST`] flag.
+    pub fn rst(&mut self) {
+        self.flags.0 |= RST.0
+    }
 }
 
 /// The serialised header size in bytes.
