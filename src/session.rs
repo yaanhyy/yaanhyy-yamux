@@ -1,4 +1,4 @@
-use crate::header::{Header, StreamId, encode};
+use crate::header::{self, Header, StreamId, encode, decode, Tag};
 use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
@@ -112,6 +112,57 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>Session<S> {
             }
             stream
         };
+
+        let mut buffer =  [0u8; header::HEADER_SIZE];
+
+        self.socket.read_exact(&mut buffer).await;
+        println!("buffer:{:?}", buffer);
+        let header =
+            match decode(&buffer) {
+                Ok(hd) => hd,
+                Err(e) => return Err("decode header fail".to_string()),
+            };
+        println!("header:{:?}", header);
+
+        let send_frame = Frame::data(stream.id(), "hello yamux".to_string().into_bytes())?;
+
+        let header = encode(&send_frame.header);
+        let res = self.socket.write_all(&header).await;
+        if let Ok(_) = res {
+            self.socket.write_all(&send_frame.body).await;
+        }
+
+        let mut buffer =  [0u8; header::HEADER_SIZE];
+
+        self.socket.read_exact(&mut buffer).await;
+        println!("buffer:{:?}", buffer);
+        let header =
+            match decode(&buffer) {
+                Ok(hd) => hd,
+                Err(e) => return Err("decode header fail".to_string()),
+            };
+
+        println!("header:{:?}", header);
+
+        if header.tag == Tag::Data {
+            let mut buffer = vec![0u8; header.length as usize];
+            self.socket.read_exact(&mut buffer).await;
+            println!("buffer data:{}", std::str::from_utf8(&buffer).unwrap());
+        }
+
+
+        let mut buffer =  [0u8; header::HEADER_SIZE];
+
+        self.socket.read_exact(&mut buffer).await;
+        println!("buffer:{:?}", buffer);
+        let header =
+            match decode(&buffer) {
+                Ok(hd) => hd,
+                Err(e) => return Err("decode header fail".to_string()),
+            };
+        println!("header:{:?}", header);
+
+
 
         Ok(stream)
     }

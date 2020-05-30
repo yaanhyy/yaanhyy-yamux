@@ -2,6 +2,7 @@ pub mod header;
 pub mod frame;
 pub mod session;
 pub mod stream;
+pub mod io;
 
 const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 

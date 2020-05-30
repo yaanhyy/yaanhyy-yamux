@@ -25,9 +25,9 @@ impl Frame {
 
 impl Frame {
     /// Create a new data frame.
-    pub fn data(id: StreamId, b: Vec<u8>) -> Result<Self, TryFromIntError> {
+    pub fn data(id: StreamId, b: Vec<u8>) -> Result<Self, String> {
         Ok(Frame {
-            header: Header::data(id, b.len().try_into()?),
+            header: Header::data(id, b.len().try_into().map_err(|e| "vec to int fail".to_string())?),
             body: b
         })
     }
