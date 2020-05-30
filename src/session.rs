@@ -122,7 +122,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>Session<S> {
                 Ok(hd) => hd,
                 Err(e) => return Err("decode header fail".to_string()),
             };
-        println!("header:{:?}", header);
+        println!("receice header:{:?}", header);
 
         let send_frame = Frame::data(stream.id(), "hello yamux".to_string().into_bytes())?;
 
@@ -142,12 +142,12 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>Session<S> {
                 Err(e) => return Err("decode header fail".to_string()),
             };
 
-        println!("header:{:?}", header);
+        println!("receice header:{:?}", header);
 
         if header.tag == Tag::Data {
             let mut buffer = vec![0u8; header.length as usize];
             self.socket.read_exact(&mut buffer).await;
-            println!("buffer data:{}", std::str::from_utf8(&buffer).unwrap());
+            println!("receice data:{}", std::str::from_utf8(&buffer).unwrap());
         }
 
 
