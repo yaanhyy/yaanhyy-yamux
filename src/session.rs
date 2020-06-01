@@ -1,13 +1,15 @@
-use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE};
+use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN};
 use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
-use crate::stream::{self, Stream};
+use std::collections::HashMap;
+use crate::stream::{self, Stream, Flag};
 use crate::frame::Frame;
 use yaanhyy_secio::codec::SecureConn;
 use yaanhyy_secio::identity::Keypair;
 use yaanhyy_secio::config::SecioConfig;
 use yaanhyy_secio::handshake::handshake;
+use crate::io::ReadState;
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode {
@@ -19,7 +21,7 @@ pub enum Mode {
 
 /// This enum captures the various stages of shutting down the connection.
 #[derive(Debug)]
-enum Shutdown {
+pub enum Shutdown {
     /// We are open for business.
     NotStarted,
     /// We have received a `ControlCommand::Close` and are shutting
@@ -60,15 +62,15 @@ pub struct RawSession<S> {
 }
 
 pub struct SecioSession<S> {
-    id: Id,
-    mode: Mode,
-    config: Arc<Config>,
-    socket: SecureConn<S>,
-    next_id: u32,
-
-    garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    shutdown: Shutdown,
-    is_closed: bool
+    pub id: Id,
+    pub mode: Mode,
+    pub config: Arc<Config>,
+    pub socket: SecureConn<S>,
+    pub next_id: u32,
+    pub streams: HashMap<u32, Stream>,
+    pub garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
+    pub shutdown: Shutdown,
+    pub is_closed: bool
 }
 
 impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>RawSession<S> {
@@ -138,7 +140,8 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>RawSession<S> {
                 Err(e) => return Err("decode header fail".to_string()),
             };
         println!("receice header:{:?}", header);
-
+//        let mut id = stream.id().val();
+//        let wrong = StreamId::new(id+1);
         let send_frame = Frame::data(stream.id(), "hello yamux".to_string().into_bytes())?;
 
         let header = encode(&send_frame.header);
@@ -195,7 +198,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             mode,
             config: Arc::new(cfg),
             socket,
-
+            streams: HashMap::new(),
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2
@@ -216,17 +219,10 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         Ok(proposed)
     }
 
-    pub async fn open_secio_stream(&mut self) -> Result<Stream, String> {
+    pub async fn open_secio_stream(&mut self) -> Result<StreamId, String> {
         let id = self.next_stream_id()?;
         if !self.config.lazy_open {
-            let mut frame = Frame::window_update(id, self.config.receive_window);
-            frame.header_mut().syn();
-            println!("{}: sending initial {:?}", self.id.0, frame.header());
-            let header = encode(&frame.header);
-            let res = self.socket.send(& mut header.to_vec()).await;
-            //if let Ok(_) = res {
-                self.socket.send(& mut frame.body).await;
-            //}
+            self.window_update_frame_send(id).await;
         }
 
         let stream = {
@@ -239,27 +235,91 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             stream
         };
 
-        let mut buffer = self.socket.read().await;
-        println!("buffer:{:?}", buffer);
-        let mut account_array: [u8; HEADER_SIZE] = Default::default();
-        account_array.copy_from_slice(buffer.as_slice());
-        let header =
-            match decode(&account_array) {
-                Ok(hd) => hd,
-                Err(e) => return Err("decode header fail".to_string()),
-            };
-        println!("receice header:{:?}", header);
 
-        let mut send_frame = Frame::data(stream.id(), "hello yamux".to_string().into_bytes())?;
+        self.streams.insert(stream.id().val(), stream.clone());
+        Ok(stream.id())
+    }
 
-        let mut header = encode(&send_frame.header);
-        let res = self.socket.send(& mut header.to_vec()).await;
-        //if let Ok(_) = res {
-            self.socket.send(& mut send_frame.body).await;
-       // }
+    pub async fn window_update_frame_send(&mut self, id: StreamId) -> Result<(),String>{
+        let mut frame = Frame::window_update(id, self.config.receive_window);
+        frame.header_mut().syn();
+        println!("{}: sending initial {:?}", self.id.0, frame.header());
+        let header = encode(&frame.header);
+        self.socket.send(& mut header.to_vec()).await
+    }
 
-        Ok(stream)
+    pub async fn data_frame_send(&mut self, stream_id: StreamId, data: Vec<u8>) -> Result<(), String>{
+        let stream = self.streams.get(&stream_id.val());
+        if let Some(stream) = stream {
+            let mut send_frame = Frame::data(stream.id(), data)?;
+            if stream.flag  == Flag::Ack {
+                send_frame.header.ack();
+            } else if  stream.flag == Flag::Syn {
+                send_frame.header.syn();
+            }
+            let mut header = encode(&send_frame.header);
+            self.socket.send(& mut header.to_vec()).await?;
+            self.socket.send(& mut send_frame.body).await?;
+            return Ok(())
+        }
+        Err("stream not founded".to_string())
+    }
 
+    pub async fn receive_frame(&mut self) -> Result<Frame ,String> {
+        let mut state = ReadState::Init;
+        loop {
+            match state {
+                ReadState::Init => {
+                    state = ReadState::Header {
+                        offset: 0,
+                        buffer: [0; header::HEADER_SIZE]
+                    };
+                },
+                ReadState::Header{ref mut offset, ref mut buffer} => {
+                    let mut read_buf = self.socket.read().await?;
+                    println!("header buffer:{:?}", buffer);
+                    if read_buf.len() < (HEADER_SIZE-*offset) {
+                        buffer[*offset..].copy_from_slice(read_buf.as_slice());
+                        *offset += read_buf.len();
+                        continue;
+                    } else {
+                        let rest = read_buf.split_off(HEADER_SIZE-*offset);
+                        buffer[*offset..].copy_from_slice(read_buf.as_slice());
+
+                        let header = match decode(&buffer) {
+                            Ok(hd) => hd,
+                            Err(e) => return Err("decode header fail".to_string()),
+                        };
+                        println!("receice header:{:?}", header);
+                        match header.tag {
+                            Tag::Data => {
+                                let frame_len = header.length;
+                                let data_buf = vec![0; frame_len as usize];
+                                state = ReadState::Body { header, offset: 0, buffer: vec![0; frame_len as usize] };
+                            },
+
+                            _ => {
+                                state = ReadState::Init;
+                                return Ok(Frame::new(header));
+                            },
+                        }
+                    }
+                }
+                ReadState::Body {ref header, ref mut offset, ref mut buffer} => {
+
+                }
+            }
+        }
+    }
+
+
+    pub async fn receive_loop(&mut self) {
+        loop {
+            let frame = self.receive_frame().await;
+            if let Ok(frame) = frame {
+                println!("header:{:?}", frame);
+            }
+        }
     }
 }
 
@@ -271,8 +331,9 @@ fn yamux_server_test() {
         let mut session = RawSession::new(connec, Config::default(), Mode::Server);
         let stream = session.open_raw_stream().await;
 
+
         if let Ok(mut stream) = stream {
-            let id = stream.id();
+
             let mut msg = "ok".to_string();
 
 //            let len = msg.len();
@@ -290,27 +351,27 @@ fn yamux_server_test() {
 }
 
 #[test]
-fn yamux_secio_client_test() {
+fn yamux_secio_client_open_stream_test() {
     async_std::task::block_on(async move {
-
-
         let connec = async_std::net::TcpStream::connect("127.0.0.1:8981").await.unwrap();
         let key1 = Keypair::generate_ed25519();
         let mut config = SecioConfig::new(key1);
         let mut res = handshake(connec, config).await;
         if let Ok(mut secure_conn) = res {
             let mut session = SecioSession::new(secure_conn, Config::default(), Mode::Client);
-            let stream = session.open_secio_stream().await;
+            let res = session.open_secio_stream().await;
 
-            if let Ok(mut stream) = stream {
-                let id = stream.id();
-                let mut msg = "ok".to_string();
 
-            } else {
-                println!("open_stream fail" );
-            }
+//            if let Ok(id) = res {
+//                session.data_frame_send(id , "hello yamux".to_string().into_bytes()).await;
+//                let mut msg = "ok".to_string();
+//                println!("open_stream success" );
+//            } else {
+//                println!("open_stream fail" );
+//            }
+            let receive_process = session.receive_loop();
+            receive_process.await;
         }
-
     });
 }
 
@@ -339,4 +400,13 @@ fn yamux_client_test() {
         }
         loop {}
     });
+}
+
+#[test]
+fn slice_copy_test() {
+    let mut src = vec![1, 2, 3, 4];
+    let rest = src.split_off(2);
+    let mut dst = [0, 0,0,0];
+    dst[2..4].copy_from_slice(&rest[0..2]);
+    println!("dst:{:?}", dst);
 }

@@ -1,7 +1,7 @@
 use crate::header;
 
 /// The stages of reading a new `Frame`.
-enum ReadState {
+pub enum ReadState {
     /// Initial reading state.
     Init,
     /// Reading the frame header.

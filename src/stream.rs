@@ -38,11 +38,11 @@ pub enum Flag {
 /// `Stream` implements [`AsyncRead`] and [`AsyncWrite`] and also
 /// [`futures::stream::Stream`].
 pub struct Stream {
-    id: StreamId,
-    conn: Id,
-    config: Arc<Config>,
-    pending: Option<Frame>,
-    flag: Flag,
+    pub id: StreamId,
+    pub conn: Id,
+    pub config: Arc<Config>,
+    pub pending: Option<Frame>,
+    pub flag: Flag,
 }
 
 impl Stream {
@@ -79,8 +79,6 @@ impl Stream {
 
         }
     }
-
-
 
     /// Set ACK or SYN flag if necessary.
     fn add_flag(&mut self, header: &mut Header) {

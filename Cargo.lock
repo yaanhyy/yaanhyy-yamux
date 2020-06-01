@@ -1610,7 +1610,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "yaanhyy-secio"
 version = "0.1.0"
-source = "git+https://github.com/yaanhyy/yaanhyy-secio.git?rev=e1fe037b74cd2f8dc686f4545627acff49c2b7f2#e1fe037b74cd2f8dc686f4545627acff49c2b7f2"
+source = "git+https://github.com/yaanhyy/yaanhyy-secio.git?rev=a9e03589931cfc212f4606195f2e4e31291b65de#a9e03589931cfc212f4606195f2e4e31291b65de"
 dependencies = [
  "aes-ctr",
  "asn1_der",
