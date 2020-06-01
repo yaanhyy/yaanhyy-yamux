@@ -45,6 +45,22 @@ pub struct Stream {
     pub flag: Flag,
 }
 
+impl fmt::Debug for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Stream")
+            .field("id", &self.id.val())
+            .field("connection", &self.conn.0)
+            .field("pending", &self.pending.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Display for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(Stream {}/{})", self.conn.0, self.id.val())
+    }
+}
+
 impl Stream {
     pub fn new
     (id: StreamId, conn: Id, config: Arc<Config>, window: u32, credit: u32) -> Self

@@ -1,4 +1,4 @@
-use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN};
+use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN, CONNECTION_ID};
 use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
@@ -19,6 +19,24 @@ pub enum Mode {
     Server
 }
 
+/// Possible actions as a result of incoming frame handling.
+#[derive(Debug)]
+pub enum Action {
+    /// Nothing to be done.
+    None,
+    /// A new stream has been opened by the remote.
+    New(Stream),
+    /// A window update should be sent to the remote.
+    Update(Frame),
+    /// A ping should be answered.
+    Ping(Frame),
+    /// A stream should be reset.
+    Reset(Frame),
+    /// The connection should be terminated.
+    Terminate(Frame)
+}
+
+
 /// This enum captures the various stages of shutting down the connection.
 #[derive(Debug)]
 pub enum Shutdown {
@@ -35,7 +53,7 @@ pub enum Shutdown {
 ///
 /// Randomly generated, this is mainly intended to improve log output.
 #[derive(Clone, Copy)]
-pub struct Id(u32);
+pub struct Id(pub u32);
 
 impl Id {
     /// Create a random connection ID.
@@ -250,6 +268,24 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         self.socket.send(& mut header.to_vec()).await
     }
 
+    pub fn on_ping_frame(&mut self, frame: Frame) ->  Action {
+        let stream_id = frame.header().stream_id;
+        if frame.header().flags.contains(header::ACK) { // pong
+            return Action::None
+        }
+
+        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id.val()) {
+            let mut hdr = Header::ping(frame.header().nonce());
+            hdr.ack();
+            return Action::Ping(Frame::new(hdr))
+        }
+        log::debug!("{}/{}: ping for unknown stream", self.id.0, stream_id);
+        let mut header = Header::data(stream_id, 0);
+        header.rst();
+        Action::Reset(Frame::new(header))
+    }
+
+
     pub async fn data_frame_send(&mut self, stream_id: StreamId, data: Vec<u8>) -> Result<(), String>{
         let stream = self.streams.get(&stream_id.val());
         if let Some(stream) = stream {
@@ -349,18 +385,43 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         loop {
             let frame: Result<Frame ,String>  = self.receive_frame().await;
             if let Ok(frame) = frame {
-                match frame.header.tag {
+                let action = match frame.header.tag {
                     Tag::Ping => {
-
+                        self.on_ping_frame(frame)
                     }
                     Tag::GoAway=> {
-
+                        Action::None
                     }
                     Tag::WindowUpdate=> {
-
+                        Action::None
                     }
                     Tag::Data => {
-
+                        Action::None
+                    }
+                };
+                match action {
+                    Action::None => {}
+                    Action::New(stream) => {
+                        log::trace!("{}: new inbound {} of ", self.id.0, stream.id);
+                        //return Ok(Some(stream))
+                    }
+                    Action::Update(f) => {
+                        log::trace!("{}/{}: sending update", self.id.0, f.header.stream_id);
+                        //self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+                    }
+                    Action::Ping(f) => {
+                        log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
+                        let header = encode(&f.header);
+                        let res = self.socket.send(& mut header.to_vec()).await;
+                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+                    }
+                    Action::Reset(f) => {
+                        log::trace!("{}/{}: sending reset", self.id.0, f.header().stream_id);
+                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+                    }
+                    Action::Terminate(f) => {
+                        log::trace!("{}: sending term", self.id.0);
+                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
                     }
                 }
             }
