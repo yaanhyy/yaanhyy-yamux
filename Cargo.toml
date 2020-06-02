@@ -16,3 +16,4 @@ log = "0.4.8"
 rand = "0.7.2"
 async-std = "1"
 yaanhyy-secio = { rev = 'a9e03589931cfc212f4606195f2e4e31291b65de', git = "https://github.com/yaanhyy/yaanhyy-secio.git"}
+pin-utils ="*"

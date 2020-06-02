@@ -1,7 +1,8 @@
 use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN, CONNECTION_ID};
 use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
-use std::{fmt, sync::Arc, task::{Context, Poll}};
+use futures::{future, select};
+use std::{fmt, sync::{Arc, Mutex}, task::{Context, Poll}, pin::Pin};
 use std::collections::HashMap;
 use crate::stream::{self, Stream, Flag};
 use crate::frame::Frame;
@@ -10,6 +11,10 @@ use yaanhyy_secio::identity::Keypair;
 use yaanhyy_secio::config::SecioConfig;
 use yaanhyy_secio::handshake::handshake;
 use crate::io::ReadState;
+use futures::future::Future;
+use futures::{channel::mpsc};
+use pin_utils::pin_mut;
+
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode {
@@ -216,7 +221,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             id,
             mode,
             config: Arc::new(cfg),
-            socket,
+            socket: socket,
             streams: HashMap::new(),
             next_id: match mode {
                 Mode::Client => 1,
@@ -237,6 +242,18 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             Mode::Server => assert!(proposed.is_server())
         }
         Ok(proposed)
+    }
+
+
+    // Check if the given stream ID is valid w.r.t. the provided tag and our connection mode.
+    fn is_valid_remote_id(&self, id: StreamId, tag: Tag) -> bool {
+        if tag == Tag::Ping || tag == Tag::GoAway {
+            return id.is_session()
+        }
+        match self.mode {
+            Mode::Client => id.is_server(),
+            Mode::Server => id.is_client()
+        }
     }
 
     pub async fn open_secio_stream(&mut self) -> Result<StreamId, String> {
@@ -266,6 +283,66 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         println!("{}: sending initial {:?}", self.id.0, frame.header());
         let header = encode(&frame.header);
         self.socket.send(& mut header.to_vec()).await
+    }
+
+    pub fn on_window_update_frame(&mut self, frame: Frame) ->  Action {
+        let stream_id = frame.header().stream_id;
+
+        if frame.header().flags.contains(header::RST) { // stream reset
+            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
+                //to do. reset stream
+            }
+            return Action::None
+        }
+
+        let is_finish = frame.header().flags.contains(header::FIN); // half-close
+
+
+        if frame.header().flags.contains(header::SYN) { // new stream
+            if !self.is_valid_remote_id(stream_id, Tag::WindowUpdate) {
+                log::error!("{}: invalid stream id {}", self.id.0, stream_id);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            if self.streams.contains_key(&stream_id.val()) {
+                log::error!("{}/{}: stream already exists", self.id.0, stream_id);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            if self.streams.len() == self.config.max_num_streams {
+                log::error!("{}: maximum number of streams reached", self.id.0);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            let stream = {
+                let credit = frame.header().credit();
+                let config = self.config.clone();
+                //let sender = self.stream_sender.clone();
+                let mut stream = Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit);
+                stream.set_flag(stream::Flag::Ack);
+                stream
+            };
+            if is_finish {
+               // stream.shared().update_state(self.id, stream_id, State::RecvClosed);
+            }
+            self.streams.insert(stream_id.val(), stream.clone());
+            return Action::New(stream)
+        }
+
+        if let Some(stream) = self.streams.get(&stream_id.val()) {
+//            let mut shared = stream.shared();
+//            shared.credit += frame.header().credit();
+//            if is_finish {
+//                shared.update_state(self.id, stream_id, State::RecvClosed);
+//            }
+//            if let Some(w) = shared.writer.take() {
+//                w.wake()
+//            }
+        } else if !is_finish {
+            log::debug!("{}/{}: window update for unknown stream", self.id.0, stream_id);
+            let mut header = Header::data(stream_id, 0);
+            header.rst();
+            return Action::Reset(Frame::new(header))
+        }
+
+        Action::None
     }
 
     pub fn on_ping_frame(&mut self, frame: Frame) ->  Action {
@@ -380,51 +457,78 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         }
     }
 
+    pub async fn on_frame(& mut self, frame: Frame) {
+        let action = match frame.header.tag {
+            Tag::Ping => {
+                self.on_ping_frame(frame)
+            }
+            Tag::GoAway=> {
+                Action::None
+            }
+            Tag::WindowUpdate=> {
+                Action::None
+            }
+            Tag::Data => {
+                Action::None
+            }
+        };
+        match action {
+            Action::None => {}
+            Action::New(stream) => {
+                log::trace!("{}: new inbound {} of ", self.id.0, stream.id);
+                //return Ok(Some(stream))
+            }
+            Action::Update(f) => {
+                log::trace!("{}/{}: sending update", self.id.0, f.header.stream_id);
+                //self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+            }
+            Action::Ping(f) => {
+                log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
+                let header = encode(&f.header);
+                let res = self.socket.send(& mut header.to_vec()).await;
+                // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+            }
+            Action::Reset(f) => {
+                log::trace!("{}/{}: sending reset", self.id.0, f.header().stream_id);
+                // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+            }
+            Action::Terminate(f) => {
+                log::trace!("{}: sending term", self.id.0);
+                // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+            }
+        }
+
+    }
+
+    pub async fn remote_frame_deal(&mut self) {
+        let res = self.receive_frame();
+ //     let local = self.send_frame();
+
+        println!("received frame");
+        if let Ok(frame) = res {
+            self.on_frame(frame).await;
+            println!("deal frame");
+        }
+    }
+
+    pub async fn send_frame(&  self) {
+
+    }
 
     pub async fn receive_loop(&mut self) {
         loop {
-            let frame: Result<Frame ,String>  = self.receive_frame().await;
-            if let Ok(frame) = frame {
-                let action = match frame.header.tag {
-                    Tag::Ping => {
-                        self.on_ping_frame(frame)
-                    }
-                    Tag::GoAway=> {
-                        Action::None
-                    }
-                    Tag::WindowUpdate=> {
-                        Action::None
-                    }
-                    Tag::Data => {
-                        Action::None
-                    }
-                };
-                match action {
-                    Action::None => {}
-                    Action::New(stream) => {
-                        log::trace!("{}: new inbound {} of ", self.id.0, stream.id);
-                        //return Ok(Some(stream))
-                    }
-                    Action::Update(f) => {
-                        log::trace!("{}/{}: sending update", self.id.0, f.header.stream_id);
-                        //self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
-                    }
-                    Action::Ping(f) => {
-                        log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
-                        let header = encode(&f.header);
-                        let res = self.socket.send(& mut header.to_vec()).await;
-                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
-                    }
-                    Action::Reset(f) => {
-                        log::trace!("{}/{}: sending reset", self.id.0, f.header().stream_id);
-                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
-                    }
-                    Action::Terminate(f) => {
-                        log::trace!("{}: sending term", self.id.0);
-                       // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
-                    }
-                }
-            }
+            //self.remote_frame_deal().await;
+            let remote_frame_future =  self.remote_frame_deal();
+            pin_mut!(remote_frame_future);
+            remote_frame_future.await;
+
+//            let local = self.send_frame();
+//            pin_mut!(local);
+//            select! {
+//                () = remote_frame_future.fuse() => println!("task one completed first"),
+//                () = receive_local_frame_future.fuse() => println!("task two completed first"),
+//            }
+
         }
     }
 }
@@ -475,8 +579,13 @@ fn yamux_secio_client_open_stream_test() {
             } else {
                 println!("open_stream fail" );
             }
+            // remote_frame_future.await;
+        //    let receive_local_frame_future = session.send_frame();
+         //   let broker = async_std::task::spawn(receive_local_frame_future);
+
             let receive_process = session.receive_loop();
             receive_process.await;
+           // broker.await;
         }
     });
 }
