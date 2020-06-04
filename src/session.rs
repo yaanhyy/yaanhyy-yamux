@@ -7,7 +7,7 @@ use std::{fmt, sync::{Arc}, task::{Context, Poll}, pin::Pin};
 use std::collections::HashMap;
 use crate::stream::{self, Stream, Flag};
 use crate::frame::Frame;
-use yaanhyy_secio::codec::SecureConn;
+use yaanhyy_secio::codec::{SecureHalfConnRead, SecureHalfConnWrite};
 use yaanhyy_secio::identity::Keypair;
 use yaanhyy_secio::config::SecioConfig;
 use yaanhyy_secio::handshake::handshake;
@@ -55,6 +55,24 @@ pub enum Shutdown {
     Complete
 }
 
+/// `Control` to `Connection` commands.
+#[derive(Debug)]
+pub enum ControlCommand {
+    /// Open a new stream to the remote end.
+    OpenStream(Stream),
+    /// Close the whole connection.
+    CloseConnection(())
+}
+
+/// `Stream` to `Connection` commands.
+#[derive(Debug)]
+pub enum StreamCommand {
+    /// A new frame should be sent to the remote.
+    SendFrame(Frame),
+    /// Close a stream.
+    CloseStream { id: StreamId, ack: bool }
+}
+
 /// The connection identifier.
 ///
 /// Randomly generated, this is mainly intended to improve log output.
@@ -85,150 +103,75 @@ pub struct RawSession<S> {
     is_closed: bool
 }
 
-pub struct Controller {
-    pub control_sender: mpsc::Sender<i32>,
-    pub control_receiver: mpsc::Receiver<i32>,
+
+pub struct SecioSessionWriter<S> {
+    pub socket: SecureHalfConnWrite<S>,
+    pub control_receiver: mpsc::Receiver<ControlCommand>,
 }
 
-pub struct SecioSession<S> {
+pub struct SecioSessionReader<S> {
     pub id: Id,
     pub mode: Mode,
     pub config: Arc<Config>,
-    pub socket: Box<SecureConn<S>>,
+    pub socket: SecureHalfConnRead<S>,
+    pub control_sender: mpsc::Sender<ControlCommand>,
     pub next_id: u32,
     pub streams: HashMap<u32, Stream>,
     pub garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
     pub shutdown: Shutdown,
     pub state: ReadState,
     pub is_closed: bool,
+}
+
+impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
+    pub fn new(socket: SecureHalfConnWrite<S>, receiver: mpsc::Receiver<ControlCommand>) -> Self
+    {
+        SecioSessionWriter {
+            socket: socket,
+            control_receiver: receiver
+        }
+    }
+
+    pub async fn window_update_frame_send(&mut self, id: StreamId, credit: u32) -> Result<(),String>{
+        let mut frame = Frame::window_update(id, credit);
+        frame.header_mut().syn();
+        println!("{}: sending initial {:?}", id.val(), frame.header());
+        let header = encode(&frame.header);
+        self.socket.send(& mut header.to_vec()).await
+    }
+
+    pub async fn data_frame_send(&mut self, stream: Stream, data: Vec<u8>) -> Result<(), String>{
+ //       let stream = self.streams.get(&stream_id.val());
+//        if let Some(stream) = stream {
+            let mut send_frame = Frame::data(stream.id(), data)?;
+            if stream.flag  == Flag::Ack {
+                send_frame.header.ack();
+            } else if  stream.flag == Flag::Syn {
+                send_frame.header.syn();
+            }
+            let mut header = encode(&send_frame.header);
+            self.socket.send(& mut header.to_vec()).await?;
+            self.socket.send(& mut send_frame.body).await?;
+            return Ok(())
+  //      }
+        //Err("stream not founded".to_string())
+    }
 
 }
 
-//impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>RawSession<S> {
-//    pub fn new(socket: S, cfg: Config, mode: Mode) -> Self
-//    {
-//        let id = Id::random();
-//        log::debug!("new connection: {:?} ({:?})", id.0, mode);
-//
-//        //let socket = frame::Io::new(id, socket, cfg.max_buffer_size);
-//        RawSession {
-//            id,
-//            mode,
-//            config: Arc::new(cfg),
-//            socket,
-//
-//            next_id: match mode {
-//                Mode::Client => 1,
-//                Mode::Server => 2
-//            },
-//            garbage: Vec::new(),
-//            shutdown: Shutdown::NotStarted,
-//            is_closed: false
-//        }
-//    }
-//
-//    fn next_stream_id(&mut self) -> Result<StreamId, String> {
-//        let proposed = StreamId::new(self.next_id);
-//        self.next_id = self.next_id + 2;
-//        match self.mode {
-//            Mode::Client => assert!(proposed.is_client()),
-//            Mode::Server => assert!(proposed.is_server())
-//        }
-//        Ok(proposed)
-//    }
-//
-//    pub async fn open_raw_stream(&mut self) -> Result<Stream, String> {
-//        let id = self.next_stream_id()?;
-//
-//        if !self.config.lazy_open {
-//            let mut frame = Frame::window_update(id, self.config.receive_window);
-//            frame.header_mut().syn();
-//            println!("{}: sending initial {:?}", self.id.0, frame.header());
-//            let header = encode(&frame.header);
-//            let res = self.socket.write_all(&header).await;
-//            if let Ok(_) = res {
-//                self.socket.write_all(&frame.body).await;
-//            }
-//        }
-//
-//        let stream = {
-//            let config = self.config.clone();
-//            let window = self.config.receive_window;
-//            let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT);
-//            if self.config.lazy_open {
-//                stream.set_flag(stream::Flag::Syn)
-//            }
-//            stream
-//        };
-//
-//        let mut buffer =  [0u8; header::HEADER_SIZE];
-//
-//        self.socket.read_exact(&mut buffer).await;
-//        println!("buffer:{:?}", buffer);
-//        let header =
-//            match decode(&buffer) {
-//                Ok(hd) => hd,
-//                Err(e) => return Err("decode header fail".to_string()),
-//            };
-//        println!("receice header:{:?}", header);
-////        let mut id = stream.id().val();
-////        let wrong = StreamId::new(id+1);
-//        let send_frame = Frame::data(stream.id(), "hello yamux".to_string().into_bytes())?;
-//
-//        let header = encode(&send_frame.header);
-//        let res = self.socket.write_all(&header).await;
-//        if let Ok(_) = res {
-//            self.socket.write_all(&send_frame.body).await;
-//        }
-//
-//        let mut buffer =  [0u8; header::HEADER_SIZE];
-//
-//        self.socket.read_exact(&mut buffer).await;
-//        println!("buffer:{:?}", buffer);
-//        let header =
-//            match decode(&buffer) {
-//                Ok(hd) => hd,
-//                Err(e) => return Err("decode header fail".to_string()),
-//            };
-//
-//        println!("receice header:{:?}", header);
-//
-//        if header.tag == Tag::Data {
-//            let mut buffer = vec![0u8; header.length as usize];
-//            self.socket.read_exact(&mut buffer).await;
-//            println!("receice data:{}", std::str::from_utf8(&buffer).unwrap());
-//        }
-//
-//
-//        let mut buffer =  [0u8; header::HEADER_SIZE];
-//
-//        self.socket.read_exact(&mut buffer).await;
-//        println!("buffer:{:?}", buffer);
-//        let header =
-//            match decode(&buffer) {
-//                Ok(hd) => hd,
-//                Err(e) => return Err("decode header fail".to_string()),
-//            };
-//        println!("header:{:?}", header);
-//
-//
-//
-//        Ok(stream)
-//    }
-//}
 
-impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
-    pub fn new(socket: SecureConn<S>, cfg: Config, mode: Mode) -> Self
+impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
+    pub fn new(socket: SecureHalfConnRead<S>, cfg: Config, mode: Mode, sender: mpsc::Sender<ControlCommand>) -> Self
     {
         let id = Id::random();
         log::debug!("new connection: {:?} ({:?})", id.0, mode);
 
         //let socket = frame::Io::new(id, socket, cfg.max_buffer_size);
-        SecioSession {
+        SecioSessionReader {
             id,
             mode,
             config: Arc::new(cfg),
-            socket: Box::new(socket),
+            socket,
             streams: HashMap::new(),
             next_id: match mode {
                 Mode::Client => 1,
@@ -238,6 +181,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             garbage: Vec::new(),
             shutdown: Shutdown::NotStarted,
             is_closed: false,
+            control_sender: sender,
         }
     }
 
@@ -263,11 +207,8 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
         }
     }
 
-    pub async fn open_secio_stream(&mut self) -> Result<StreamId, String> {
+    pub async fn open_secio_stream(&mut self) -> Result<Stream, String> {
         let id = self.next_stream_id()?;
-        if !self.config.lazy_open {
-            self.window_update_frame_send(id).await;
-        }
 
         let stream = {
             let config = self.config.clone();
@@ -279,18 +220,15 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             stream
         };
 
+        if !self.config.lazy_open {
+            self.control_sender.send(ControlCommand::OpenStream(stream.clone()));
+        }
 
         self.streams.insert(stream.id().val(), stream.clone());
-        Ok(stream.id())
+        Ok(stream)
     }
 
-    pub async fn window_update_frame_send(&mut self, id: StreamId) -> Result<(),String>{
-        let mut frame = Frame::window_update(id, self.config.receive_window);
-        frame.header_mut().syn();
-        println!("{}: sending initial {:?}", self.id.0, frame.header());
-        let header = encode(&frame.header);
-        self.socket.send(& mut header.to_vec()).await
-    }
+
 
     pub fn on_window_update_frame(&mut self, frame: Frame) ->  Action {
         let stream_id = frame.header().stream_id;
@@ -370,30 +308,12 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
     }
 
 
-    pub async fn data_frame_send(&mut self, stream_id: StreamId, data: Vec<u8>) -> Result<(), String>{
-        let stream = self.streams.get(&stream_id.val());
-        if let Some(stream) = stream {
-            let mut send_frame = Frame::data(stream.id(), data)?;
-            if stream.flag  == Flag::Ack {
-                send_frame.header.ack();
-            } else if  stream.flag == Flag::Syn {
-                send_frame.header.syn();
-            }
-            let mut header = encode(&send_frame.header);
-            self.socket.send(& mut header.to_vec()).await?;
-            self.socket.send(& mut send_frame.body).await?;
-            return Ok(())
-        }
-        Err("stream not founded".to_string())
-    }
 
-    pub async fn receive_frame(& mut self, mut state: ReadState) -> Result<Frame ,String> {
-
-
+    pub async fn receive_frame(& mut self) -> Result<Frame ,String> {
         loop {
-            match state {
+            match self.state {
                 ReadState::Init => {
-                     state = ReadState::Header {
+                    self.state = ReadState::Header {
                         offset: 0,
                         buffer: [0; header::HEADER_SIZE]
                     };
@@ -419,10 +339,10 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
                                 let frame_len = header.length;
                                 let data_buf = vec![0; frame_len as usize];
                                 if rest.len() as u32 == frame_len {
-                                    state = ReadState::Init;
+                                    self.state = ReadState::Init;
                                     return Ok(Frame{header, body: rest});
                                 } else if (rest.len() as u32) < frame_len {
-                                    state = ReadState::Body { header, offset: rest.len(), buffer: rest};
+                                    self.state = ReadState::Body { header, offset: rest.len(), buffer: rest};
                                 } else {
                                     println!("have rest data in next frame");
                                 }
@@ -438,7 +358,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
 //                                    };
                                     println!("have rest data in next frame");
                                 } else {
-                                    state = ReadState::Init;
+                                    self.state = ReadState::Init;
                                 }
                                 return Ok(Frame::new(header));
                             },
@@ -451,7 +371,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
                         let h = header.clone();
                         buffer.append(& mut read_buf);
                         let buffer_clone = buffer.clone();
-                        state = ReadState::Init;
+                        self.state = ReadState::Init;
                         return Ok(Frame{header: h, body: (*buffer_clone).to_vec()});
                     } else if read_buf.len() < (header.length  as usize - *offset) {
                         *offset += read_buf.len();
@@ -493,7 +413,7 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
                 let header = encode(&f.header);
-                let res = self.socket.send(& mut header.to_vec()).await;
+                //let res = self.socket.send(& mut header.to_vec()).await;
                 // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
             }
             Action::Reset(f) => {
@@ -508,40 +428,38 @@ impl <S: AsyncRead + AsyncWrite  + Send + Unpin + 'static>SecioSession<S> {
 
     }
 
-    pub async fn remote_frame_deal(&mut self, mut controller: &Controller) {
-        let receive_frame_future = SecioSession::receive_frame(self, self.state.clone());
-        let send_frame_future = send_frame(controller.control_sender.clone());
-        select! {
-                res = receive_frame_future.fuse() => {
-                    println!("received frame");
-                    if let Ok(frame) = res {
-                        self.on_frame(frame).await;
-                        println!("deal frame");
-                    }
-                },
-                () = send_frame_future.fuse() => println!("task two completed first"),
-         }
+    // pub async fn remote_frame_deal(&mut self, mut controller: &Controller) {
+    //     let receive_frame_future = self.receive_frame();
+    //     let send_frame_future = send_frame(controller.control_sender.clone());
+    //     select! {
+    //             res = receive_frame_future.fuse() => {
+    //                 println!("received frame");
+    //                 if let Ok(frame) = res {
+    //                     self.on_frame(frame).await;
+    //                     println!("deal frame");
+    //                 }
+    //             },
+    //             () = send_frame_future.fuse() => println!("task two completed first"),
+    //      }
+    //
+    // }
 
-    }
 
-
-    pub async fn receive_loop(&mut self, mut controller: &Controller) {
+    pub async fn receive_loop(&mut self) {
         loop {
             //self.remote_frame_deal().await;
-            let remote_frame_future =  self.remote_frame_deal(controller);
-            pin_mut!(remote_frame_future);
-            remote_frame_future.await;
-
-//            let local = self.send_frame();
-//            pin_mut!(local);
-//            select! {
-//                () = remote_frame_future.fuse() => println!("task one completed first"),
-//                () = receive_local_frame_future.fuse() => println!("task two completed first"),
-//            }
-
+            let remote_frame_future =  self.receive_frame();
+            //pin_mut!(remote_frame_future);
+            let res = remote_frame_future.await;
+            if let Ok(frame) = res {
+                self.on_frame(frame).await;
+                println!("deal frame");
+            }
         }
     }
 }
+
+
 
 pub async fn send_frame(send: mpsc::Sender<i32>) {
 
@@ -582,15 +500,16 @@ fn yamux_secio_client_open_stream_test() {
         let key1 = Keypair::generate_ed25519();
         let mut config = SecioConfig::new(key1);
         let (control_sender, control_receiver) = mpsc::channel(10);
-        let mut controller = Controller{control_sender, control_receiver};
+
         let mut res = handshake(connec, config).await;
-        if let Ok(mut secure_conn) = res {
-            let mut session = SecioSession::new(secure_conn, Config::default(), Mode::Client);
-            let res = session.open_secio_stream().await;
+        if let Ok((mut secure_conn_writer, mut secure_conn_reader )) = res {
+            let mut session_reader = SecioSessionReader::new(secure_conn_reader, Config::default(), Mode::Client, control_sender);
+            let mut session_writer = SecioSessionWriter::new(secure_conn_writer, control_receiver);
+            let res = session_reader.open_secio_stream().await;
 
 
             if let Ok(id) = res {
-                session.data_frame_send(id , "hello yamux".to_string().into_bytes()).await;
+                session_writer.data_frame_send(id , "hello yamux".to_string().into_bytes()).await;
                 let mut msg = "ok".to_string();
                 println!("open_stream success" );
             } else {
@@ -598,9 +517,9 @@ fn yamux_secio_client_open_stream_test() {
             }
             // remote_frame_future.await;
         //    let receive_local_frame_future = session.send_frame();
-         //   let broker = async_std::task::spawn(receive_local_frame_future);
+        //   let broker = async_std::task::spawn(receive_local_frame_future);
 
-            let receive_process = session.receive_loop(&controller);
+            let receive_process = session_reader.receive_loop();
             receive_process.await;
            // broker.await;
         }

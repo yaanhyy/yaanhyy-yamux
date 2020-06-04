@@ -1610,7 +1610,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "yaanhyy-secio"
 version = "0.1.0"
-source = "git+https://github.com/yaanhyy/yaanhyy-secio.git?rev=a9e03589931cfc212f4606195f2e4e31291b65de#a9e03589931cfc212f4606195f2e4e31291b65de"
+source = "git+https://github.com/yaanhyy/yaanhyy-secio.git?rev=d0d4724978142ddf015da0e9bf91c4d251a4edfb#d0d4724978142ddf015da0e9bf91c4d251a4edfb"
 dependencies = [
  "aes-ctr",
  "asn1_der",
@@ -1619,6 +1619,7 @@ dependencies = [
  "ed25519-dalek",
  "fnv",
  "futures 0.3.5",
+ "futures-util",
  "grpcio",
  "hmac",
  "lazy_static",
