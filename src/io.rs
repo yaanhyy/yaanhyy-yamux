@@ -1,5 +1,6 @@
 use crate::header;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// The stages of reading a new `Frame`.
 pub enum ReadState {
     /// Initial reading state.
