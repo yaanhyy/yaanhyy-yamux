@@ -37,6 +37,7 @@ pub enum Flag {
 ///
 /// `Stream` implements [`AsyncRead`] and [`AsyncWrite`] and also
 /// [`futures::stream::Stream`].
+#[derive(Clone)]
 pub struct Stream {
     pub id: StreamId,
     pub conn: Id,
