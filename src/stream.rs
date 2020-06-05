@@ -63,7 +63,7 @@ impl fmt::Display for Stream {
 
 impl Stream {
     pub fn new
-    (id: StreamId, conn: Id, config: Arc<Config>, window: u32, credit: u32) -> Self
+    (id: StreamId, conn: Id, config: Arc<Config>) -> Self
     {
         Stream {
             id,

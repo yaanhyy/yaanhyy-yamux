@@ -1,7 +1,7 @@
 use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN, CONNECTION_ID};
 use super::{Config, DEFAULT_CREDIT};
 use futures::prelude::*;
-use futures::{future, select};
+use futures::{future, select, join};
 use async_std::sync::Mutex;
 use std::{fmt, sync::{Arc}, task::{Context, Poll}, pin::Pin};
 use std::collections::HashMap;
@@ -132,9 +132,13 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
         }
     }
 
-    pub async fn window_update_frame_send(&mut self, id: StreamId, credit: u32) -> Result<(),String>{
+    pub async fn window_update_frame_send(&mut self, id: StreamId, credit: u32, flag: Flag) -> Result<(),String>{
         let mut frame = Frame::window_update(id, credit);
-        frame.header_mut().syn();
+        if  flag == Flag::Syn {
+            frame.header_mut().syn();
+        } else if flag == Flag::Ack {
+            frame.header_mut().ack();
+        }
         println!("{}: sending initial {:?}", id.val(), frame.header());
         let header = encode(&frame.header);
         self.socket.send(& mut header.to_vec()).await
@@ -157,6 +161,22 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
         //Err("stream not founded".to_string())
     }
 
+    pub async fn send_process(&mut self) {
+        loop {
+            println!("start send process");
+            let res = self.control_receiver.next().await;
+            match res {
+                Some(ControlCommand::OpenStream(stream)) => {
+                    println!("window_update_frame_send");
+                    self.window_update_frame_send(stream.id(), stream.config.receive_window, Flag::Syn).await.unwrap()
+
+                },
+                _ => {
+                    println!("receive nothing");
+                },
+            }
+        }
+    }
 }
 
 
@@ -213,7 +233,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         let stream = {
             let config = self.config.clone();
             let window = self.config.receive_window;
-            let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT);
+            let mut stream = Stream::new(id, self.id, config);
             if self.config.lazy_open {
                 stream.set_flag(stream::Flag::Syn)
             }
@@ -221,7 +241,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         };
 
         if !self.config.lazy_open {
-            self.control_sender.send(ControlCommand::OpenStream(stream.clone()));
+            self.control_sender.send(ControlCommand::OpenStream(stream.clone())).await;
         }
 
         self.streams.insert(stream.id().val(), stream.clone());
@@ -257,10 +277,9 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 return Action::Terminate(Frame::protocol_error())
             }
             let stream = {
-                let credit = frame.header().credit();
                 let config = self.config.clone();
                 //let sender = self.stream_sender.clone();
-                let mut stream = Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit);
+                let mut stream = Stream::new(stream_id, self.id, config);
                 stream.set_flag(stream::Flag::Ack);
                 stream
             };
@@ -413,7 +432,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
                 let header = encode(&f.header);
-                //let res = self.socket.send(& mut header.to_vec()).await;
+                let res = self.socket.send(& mut header.to_vec()).await;
                 // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
             }
             Action::Reset(f) => {
@@ -446,8 +465,10 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
 
 
     pub async fn receive_loop(&mut self) {
+        self.open_secio_stream().await;
         loop {
             //self.remote_frame_deal().await;
+
             let remote_frame_future =  self.receive_frame();
             //pin_mut!(remote_frame_future);
             let res = remote_frame_future.await;
@@ -505,13 +526,13 @@ fn yamux_secio_client_open_stream_test() {
         if let Ok((mut secure_conn_writer, mut secure_conn_reader )) = res {
             let mut session_reader = SecioSessionReader::new(secure_conn_reader, Config::default(), Mode::Client, control_sender);
             let mut session_writer = SecioSessionWriter::new(secure_conn_writer, control_receiver);
-            let res = session_reader.open_secio_stream().await;
+             let res = session_reader.open_secio_stream().await;
 
 
             if let Ok(id) = res {
                 session_writer.data_frame_send(id , "hello yamux".to_string().into_bytes()).await;
                 let mut msg = "ok".to_string();
-                println!("open_stream success" );
+                println!("open_stream success");
             } else {
                 println!("open_stream fail" );
             }
@@ -526,6 +547,27 @@ fn yamux_secio_client_open_stream_test() {
     });
 }
 
+#[test]
+fn yamux_secio_client_process_test() {
+    async_std::task::block_on(async move {
+        let connec = async_std::net::TcpStream::connect("127.0.0.1:8981").await.unwrap();
+        let key1 = Keypair::generate_ed25519();
+        let mut config = SecioConfig::new(key1);
+        let (control_sender, control_receiver) = mpsc::channel(10);
+
+        let mut res = handshake(connec, config).await;
+        if let Ok((mut secure_conn_writer, mut secure_conn_reader )) = res {
+            let mut session_reader = SecioSessionReader::new(secure_conn_reader, Config::default(), Mode::Client, control_sender);
+            let mut session_writer = SecioSessionWriter::new(secure_conn_writer, control_receiver);
+
+
+            let receive_process = session_reader.receive_loop();
+            let send_process = session_writer.send_process();
+            join!{receive_process, send_process};
+            // broker.await;
+        }
+    });
+}
 
 //#[test]
 //fn yamux_client_test() {
