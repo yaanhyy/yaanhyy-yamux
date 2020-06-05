@@ -484,46 +484,54 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
 
 
     pub async fn receive_loop(&mut self, mut control_receiver: mpsc::Receiver<ControlCommand>) {
+        let receiver = control_receiver.next().await;
+        match receiver {
+            Some(ControlCommand::OpenStream(mut rx)) => {
+                let res = self.open_secio_stream().await;
+                if res.is_ok() {
+                    rx.send(res);
+                }
+
+            },
+            _ => (),
+        }
+
         loop {
 
-//            let receiver = control_receiver.next().await;
-//            match receiver {
-//                ControlCommand::OpenStream(tx) => {
-//                    let res = self.open_secio_stream().await;
-//                    if res.is_ok() {
-//                        rx.send(res)
-//                    }
-//
-//                }
-//            }
-            let receiver = control_receiver.next();
             let remote_frame_future =  self.receive_frame();
-                 select! {
-                         res = remote_frame_future.fuse() => {
-                             println!("received frame");
-                             if let Ok(frame) = res {
-                                 self.on_frame(frame).await;
-                                 println!("deal frame");
-                             }
-                         },
-                         res = receiver.fuse() => {
-                            match res {
-                                Some(ControlCommand::OpenStream(rx)) => {
-                                    let open_stream = self.open_secio_stream().await;
-                                    if open_stream.is_ok() {
-                                        rx.send(open_stream);
-                                    }
-                                }
-                                _ => (),
-                            }
-                            println!("task two completed first")
-                         },
-                  }
-//            let res = remote_frame_future.await;
-//            if let Ok(frame) = res {
-//                self.on_frame(frame).await;
-//                println!("deal frame");
-//            }
+            let res = remote_frame_future.await;
+            if let Ok(frame) = res {
+                self.on_frame(frame).await;
+                println!("deal frame");
+            }
+
+
+
+//            let receiver = control_receiver.next().fuse();
+//            let remote_frame_future =  self.receive_frame().fuse();
+//
+//            pin_mut!(receiver, remote_frame_future);
+//            select! {
+//                         res = remote_frame_future => {
+//                             println!("received frame");
+//                             if let Ok(frame) = res {
+//                                 self.on_frame(frame).await;
+//                                 println!("deal frame");
+//                             }
+//                         },
+//                         res = receiver => {
+//                            match res {
+//                                Some(ControlCommand::OpenStream(rx)) => {
+//                                    let open_stream = self.open_secio_stream().await;
+//                                    if open_stream.is_ok() {
+//                                        rx.send(open_stream);
+//                                    }
+//                                }
+//                                _ => (),
+//                            }
+//                            println!("task two completed first")
+//                         },
+//                  }
         }
     }
 }
@@ -612,8 +620,11 @@ pub async fn period_send(mut stream_sender: mpsc::Sender<StreamCommand>, sender:
     let res = open_stream(sender).await;
     if let Ok(stream) = res {
         loop {
-            task::sleep(Duration::from_secs(1)).await;
             println!("period_send");
+            let frame = Frame::data(stream.id(), "love and peace".to_string().into_bytes()).unwrap();
+            stream_sender.send(StreamCommand::SendFrame(frame)).await;
+            task::sleep(Duration::from_secs(10)).await;
+
         }
     } else {
         println!("fail open stream");
