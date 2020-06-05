@@ -60,6 +60,7 @@ pub enum Shutdown {
 pub enum ControlCommand {
     /// Open a new stream to the remote end.
     OpenStream(Stream),
+    SendFrame(Frame),
     /// Close the whole connection.
     CloseConnection(())
 }
@@ -161,6 +162,16 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
         //Err("stream not founded".to_string())
     }
 
+    pub async fn frame_send(&mut self, mut frame: Frame) -> Result<(), String>{
+
+        let mut header = encode(&frame.header);
+        self.socket.send(& mut header.to_vec()).await?;
+        if !frame.body.is_empty() {
+            self.socket.send(&mut frame.body).await?;
+        }
+        return Ok(())
+    }
+
     pub async fn send_process(&mut self) {
         loop {
             println!("start send process");
@@ -171,6 +182,9 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
                     self.window_update_frame_send(stream.id(), stream.config.receive_window, Flag::Syn).await.unwrap()
 
                 },
+                Some(ControlCommand::SendFrame(frame) ) => {
+                    self.frame_send(frame).await;
+                }
                 _ => {
                     println!("receive nothing");
                 },
@@ -431,8 +445,8 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
             }
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id.0, f.header.stream_id);
-                let header = encode(&f.header);
-                let res = self.socket.send(& mut header.to_vec()).await;
+                //let header = encode(&f.header);
+                let res = self.control_sender.send(ControlCommand::SendFrame(f)).await;
                 // self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
             }
             Action::Reset(f) => {
