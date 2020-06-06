@@ -4,7 +4,7 @@ use super::frame::{Frame};
 use super::Config;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
 use futures::{channel::{mpsc, oneshot}};
-
+use super::session::StreamCommand;
 /// The state of a Yamux stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
@@ -37,13 +37,15 @@ pub enum Flag {
 ///
 /// `Stream` implements [`AsyncRead`] and [`AsyncWrite`] and also
 /// [`futures::stream::Stream`].
-#[derive(Clone)]
+
 pub struct Stream {
     pub id: StreamId,
     pub conn: Id,
     pub config: Arc<Config>,
     pub pending: Option<Frame>,
-    //pub data_receiver: mpsc<Frame>,
+    pub sender: mpsc::Sender<StreamCommand>,
+    pub data_receiver: Option<mpsc::Receiver<Vec<u8>>>,
+    pub data_sender: Option<mpsc::Sender<Vec<u8>>>,
     pub flag: Flag,
 }
 
@@ -65,7 +67,7 @@ impl fmt::Display for Stream {
 
 impl Stream {
     pub fn new
-    (id: StreamId, conn: Id, config: Arc<Config>) -> Self
+    (id: StreamId, conn: Id, config: Arc<Config>, sender: mpsc::Sender<StreamCommand>) -> Self
     {
         Stream {
             id,
@@ -73,7 +75,9 @@ impl Stream {
             config,
             pending: None,
             flag: Flag::None,
-      //      data_receiver: m
+            sender,
+            data_receiver: None,
+            data_sender: None
         }
     }
 
@@ -92,7 +96,9 @@ impl Stream {
             id: self.id,
             conn: self.conn,
             config: self.config.clone(),
-
+            sender: self.sender.clone(),
+            data_receiver: None,
+            data_sender: None,
             pending: None,
             flag: self.flag,
 

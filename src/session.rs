@@ -249,23 +249,27 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
     pub async fn open_secio_stream(&mut self) -> Result<Stream, String> {
         let id = self.next_stream_id()?;
 
-        let stream = {
+        let mut stream = {
             let config = self.config.clone();
             let window = self.config.receive_window;
-            let mut stream = Stream::new(id, self.id, config);
+            let mut stream = Stream::new(id, self.id, config, self.stream_sender.clone());
             if self.config.lazy_open {
                 stream.set_flag(stream::Flag::Syn)
             }
             stream
         };
 
+        let (data_sender, data_recerver) = mpsc::channel(10);
         if !self.config.lazy_open {
             let mut frame = Frame::window_update(stream.id(), stream.config.receive_window);
             frame.header.syn();
             self.stream_sender.send(StreamCommand::SendFrame(frame)).await;
         }
 
-        self.streams.insert(stream.id().val(), stream.clone());
+        let mut stream_session_reader = stream.clone();
+        stream_session_reader.data_sender = Some(data_sender);
+        self.streams.insert(stream.id().val(), stream_session_reader);
+        stream.data_receiver = Some(data_recerver);
         Ok(stream)
     }
 
@@ -300,7 +304,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
             let stream = {
                 let config = self.config.clone();
                 //let sender = self.stream_sender.clone();
-                let mut stream = Stream::new(stream_id, self.id, config);
+                let mut stream = Stream::new(stream_id, self.id, config, self.stream_sender.clone());
                 stream.set_flag(stream::Flag::Ack);
                 stream
             };
@@ -347,7 +351,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         Action::Reset(Frame::new(header))
     }
 
-    fn on_data(&mut self, frame: Frame) -> Action {
+    async fn on_data(&mut self, frame: Frame) -> Action {
         let stream_id = frame.header().stream_id;
 
         if frame.header().flags.contains(header::RST) { // stream reset
@@ -387,7 +391,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 let config = self.config.clone();
                 let credit = DEFAULT_CREDIT;
                 let sender = self.stream_sender.clone();
-                let mut stream = Stream::new(stream_id, self.id, config);
+                let mut stream = Stream::new(stream_id, self.id, config, self.stream_sender.clone());
                 stream.set_flag(stream::Flag::Ack);
                 stream
             };
@@ -413,6 +417,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 // shared.update_state(self.id, stream_id, State::RecvClosed);
             }
             let max_buffer_size = self.config.max_buffer_size;
+            stream.data_sender.as_mut().unwrap().send(frame.into_body()).await;
             // if shared.buffer.len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
             //     log::error!("{}/{}: buffer of stream grows beyond limit", self.id, stream_id);
             //     let mut header = Header::data(stream_id, 0);
@@ -530,7 +535,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 self.on_window_update_frame(frame)
             }
             Tag::Data => {
-                self.on_data(frame)
+                self.on_data(frame).await
             }
         };
         match action {
@@ -751,15 +756,19 @@ fn yamux_secio_client_open_stream_test() {
     });
 }
 
-pub async fn period_send(mut stream_sender: mpsc::Sender<StreamCommand>, sender: mpsc::Sender<ControlCommand>) {
+pub async fn period_send( sender: mpsc::Sender<ControlCommand>) {
     let res = open_stream(sender).await;
     let mut index = 0;
-    if let Ok(stream) = res {
+    if let Ok(mut stream) = res {
+        let mut stream_clone = stream.clone();
+        let mut data_receiver = stream.data_receiver.unwrap();
+
         loop {
-            println!("period_send");
             index +=1;
-            let frame = Frame::data(stream.id(), format!("love and peace:{}", index).into_bytes()).unwrap();
-            stream_sender.send(StreamCommand::SendFrame(frame)).await;
+            let frame = Frame::data(stream_clone.id(), format!("love and peace:{}", index).into_bytes()).unwrap();
+            stream_clone.sender.send(StreamCommand::SendFrame(frame)).await;
+            let buf =  data_receiver.next().await;
+            println!("receive:{:?}", buf);
             task::sleep(Duration::from_secs(10)).await;
 
         }
@@ -782,7 +791,7 @@ fn yamux_secio_client_process_test() {
             let mut session_reader = SecioSessionReader::new(secure_conn_reader, Config::default(), Mode::Client, stream_sender.clone());
             let mut session_writer = SecioSessionWriter::new(secure_conn_writer, stream_receiver);
 
-            let period_send = period_send( stream_sender,control_sender);
+            let period_send = period_send( control_sender);
             let receive_process = session_reader.receive_loop( control_receiver);
             let send_process = session_writer.send_process();
             join!{receive_process, send_process, period_send};
