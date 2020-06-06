@@ -530,7 +530,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 self.on_window_update_frame(frame)
             }
             Tag::Data => {
-                Action::None
+                self.on_data(frame)
             }
         };
         match action {
@@ -782,7 +782,7 @@ fn yamux_secio_client_process_test() {
             let mut session_reader = SecioSessionReader::new(secure_conn_reader, Config::default(), Mode::Client, stream_sender.clone());
             let mut session_writer = SecioSessionWriter::new(secure_conn_writer, stream_receiver);
 
-            let period_send = period_send(stream_sender,control_sender);
+            let period_send = period_send( stream_sender,control_sender);
             let receive_process = session_reader.receive_loop( control_receiver);
             let send_process = session_writer.send_process();
             join!{receive_process, send_process, period_send};
