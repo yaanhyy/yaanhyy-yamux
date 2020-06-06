@@ -3,7 +3,7 @@ use super::header::{StreamId, Header};
 use super::frame::{Frame};
 use super::Config;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
-
+use futures::{channel::{mpsc, oneshot}};
 
 /// The state of a Yamux stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,7 @@ pub struct Stream {
     pub conn: Id,
     pub config: Arc<Config>,
     pub pending: Option<Frame>,
+    //pub data_receiver: mpsc<Frame>,
     pub flag: Flag,
 }
 
@@ -72,6 +73,7 @@ impl Stream {
             config,
             pending: None,
             flag: Flag::None,
+      //      data_receiver: m
         }
     }
 

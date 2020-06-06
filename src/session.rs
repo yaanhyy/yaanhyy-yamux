@@ -1,5 +1,5 @@
 use crate::header::{self, Header, StreamId, encode, decode, Tag, HEADER_SIZE, Flags, ACK, FIN, SYN, CONNECTION_ID};
-use super::{Config, DEFAULT_CREDIT};
+use super::{Config, DEFAULT_CREDIT, WindowUpdateMode};
 use futures::prelude::*;
 use futures::{future, select, join};
 use async_std::sync::Mutex;
@@ -347,7 +347,100 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         Action::Reset(Frame::new(header))
     }
 
+    fn on_data(&mut self, frame: Frame) -> Action {
+        let stream_id = frame.header().stream_id;
 
+        if frame.header().flags.contains(header::RST) { // stream reset
+            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
+                // let mut shared = s.shared();
+                // shared.update_state(self.id, stream_id, State::Closed);
+                // if let Some(w) = shared.reader.take() {
+                //     w.wake()
+                // }
+                // if let Some(w) = shared.writer.take() {
+                //     w.wake()
+                // }
+            }
+            return Action::None
+        }
+
+        let is_finish = frame.header().flags.contains(header::FIN); // half-close
+
+        if frame.header().flags.contains(header::SYN) { // new stream
+            if !self.is_valid_remote_id(stream_id, Tag::Data) {
+                log::error!("{}: invalid stream id {}", self.id.0, stream_id);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            if frame.body().len() > DEFAULT_CREDIT as usize {
+                log::error!("{}/{}: 1st body of stream exceeds default credit", self.id.0, stream_id);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            if self.streams.contains_key(&stream_id.val()) {
+                log::error!("{}/{}: stream already exists", self.id.0, stream_id);
+                return Action::Terminate(Frame::protocol_error())
+            }
+            if self.streams.len() == self.config.max_num_streams {
+                log::error!("{}: maximum number of streams reached", self.id.0);
+                return Action::Terminate(Frame::internal_error())
+            }
+            let stream = {
+                let config = self.config.clone();
+                let credit = DEFAULT_CREDIT;
+                let sender = self.stream_sender.clone();
+                let mut stream = Stream::new(stream_id, self.id, config);
+                stream.set_flag(stream::Flag::Ack);
+                stream
+            };
+            // {
+            //     let mut shared = stream.shared();
+            //     if is_finish {
+            //         shared.update_state(self.id, stream_id, State::RecvClosed);
+            //     }
+            //     shared.window = shared.window.saturating_sub(frame.body_len());
+            //     shared.buffer.push(frame.into_body());
+            // }
+            self.streams.insert(stream_id.val(), stream.clone());
+            return Action::New(stream)
+        }
+
+        if let Some(stream) = self.streams.get_mut(&stream_id.val()) {
+            // let mut shared = stream.shared();
+            // if frame.body().len() > shared.window as usize {
+            //     log::error!("{}/{}: frame body larger than window of stream", self.id, stream_id);
+            //     return Action::Terminate(Frame::protocol_error())
+            // }
+            if is_finish {
+                // shared.update_state(self.id, stream_id, State::RecvClosed);
+            }
+            let max_buffer_size = self.config.max_buffer_size;
+            // if shared.buffer.len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
+            //     log::error!("{}/{}: buffer of stream grows beyond limit", self.id, stream_id);
+            //     let mut header = Header::data(stream_id, 0);
+            //     header.rst();
+            //     return Action::Reset(Frame::new(header))
+            // }
+            // shared.window = shared.window.saturating_sub(frame.body_len());
+            // shared.buffer.push(frame.into_body());
+            // if let Some(w) = shared.reader.take() {
+            //     w.wake()
+            // }
+            // if !is_finish
+            //     && shared.window == 0
+            //     && self.config.window_update_mode == WindowUpdateMode::OnReceive
+            // {
+            //     shared.window = self.config.receive_window;
+            //     let frame = Frame::window_update(stream_id, self.config.receive_window);
+            //     return Action::Update(frame)
+            // }
+        } else if !is_finish {
+            log::debug!("{}/{}: data for unknown stream", self.id.0, stream_id);
+            let mut header = Header::data(stream_id, 0);
+            header.rst();
+            return Action::Reset(Frame::new(header))
+        }
+
+        Action::None
+    }
 
     pub async fn receive_frame(& mut self) -> Result<Frame ,String> {
         loop {
@@ -528,51 +621,51 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         let remote_frame_future = self.receive_frame();
        //pin_mut!(remote_frame_future, receiver);
 
-        //let res = select! {
-        select! {
+        let res = select! {
+        //select! {
                          res = remote_frame_future.fuse() => {
                              println!("received frame");
-//
-                             if let Ok(frame) = res {
-                                 self.on_frame(frame).await;
-                                 println!("deal frame");
-                             }
+                             Either::Left(res)
+//                              if let Ok(frame) = res {
+//                                  self.on_frame(frame).await;
+//                                  println!("deal frame");
+//                              }
                          },
                          res = receiver => {
                             println!("task two completed first");
-//                            Either::Right(res)
-                            match res {
-                                Some(ControlCommand::OpenStream(rx)) => {
-                                    let open_stream = self.open_secio_stream().await;
-                                    if open_stream.is_ok() {
-                                        rx.send(open_stream);
-                                    }
-                                }
-                                _ => (),
-                            }
+                            Either::Right(res)
+                            // match res {
+                            //     Some(ControlCommand::OpenStream(tx)) => {
+                            //         let open_stream = self.open_secio_stream().await;
+                            //         if open_stream.is_ok() {
+                            //             tx.send(open_stream);
+                            //         }
+                            //     }
+                            //     _ => (),
+                            // }
                          },
                   };
-        //remote_frame_future.drop();
-//            match res {
-//                Either::Left(res) => {
-//                    if let Ok(frame) = res {
-//                        self.on_frame(frame).await;
-//                        println!("deal frame");
-//                    }
-//                },
-//                Either::Right(res) => {
-//                    match res {
-//                        Some(ControlCommand::OpenStream(mut rx)) => {
-//                            let open_stream = self.open_secio_stream().await;
-//                            if open_stream.is_ok() {
-//                                rx.send(open_stream);
-//                            }
-//                        }
-//                        _ => (),
-//                    }
-//                },
-//                _ => {println!("select res:{:?}", res)},
-//            }
+
+           match res {
+               Either::Left(res) => {
+                   if let Ok(frame) = res {
+                       self.on_frame(frame).await;
+                       println!("deal frame");
+                   }
+               },
+               Either::Right(res) => {
+                   match res {
+                       Some(ControlCommand::OpenStream(mut rx)) => {
+                           let open_stream = self.open_secio_stream().await;
+                           if open_stream.is_ok() {
+                               rx.send(open_stream);
+                           }
+                       }
+                       _ => (),
+                   }
+               },
+               _ => {println!("select res:{:?}", res)},
+           }
 
         }
     }
