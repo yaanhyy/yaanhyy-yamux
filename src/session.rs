@@ -443,7 +443,15 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
             }
             let max_buffer_size = self.config.max_buffer_size;
             if stream.data_sender.is_some() {
+                if !stream.cache.is_empty() {
+                    stream.data_sender.as_mut().unwrap().send(stream.cache.clone()).await;
+                    stream.cache.clear();
+                }
+                stream.data_sender.as_mut().unwrap().send(frame.header.length.to_be_bytes().to_vec()).await;
                 stream.data_sender.as_mut().unwrap().send(frame.into_body()).await;
+            } else {
+                stream.cache.append(& mut frame.header.length.to_be_bytes().to_vec());
+                stream.cache.append(& mut frame.into_body());
             }
             // if shared.buffer.len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
             //     log::error!("{}/{}: buffer of stream grows beyond limit", self.id, stream_id);

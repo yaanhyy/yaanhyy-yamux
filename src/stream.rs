@@ -46,6 +46,7 @@ pub struct Stream {
     pub sender: mpsc::Sender<StreamCommand>,
     pub data_receiver: Option<mpsc::Receiver<Vec<u8>>>,
     pub data_sender: Option<mpsc::Sender<Vec<u8>>>,
+    pub cache: Vec<u8>,
     pub flag: Flag,
 }
 
@@ -76,6 +77,7 @@ impl Stream {
             pending: None,
             flag: Flag::None,
             sender,
+            cache: Vec::new(),
             data_receiver: None,
             data_sender: None
         }
@@ -97,6 +99,7 @@ impl Stream {
             conn: self.conn,
             config: self.config.clone(),
             sender: self.sender.clone(),
+            cache: self.cache.clone(),
             data_receiver: None,
             data_sender: None,
             pending: None,
