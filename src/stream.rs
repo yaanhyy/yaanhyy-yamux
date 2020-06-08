@@ -87,11 +87,11 @@ impl Stream {
     }
 
     /// Set the flag that should be set on the next outbound frame header.
-    pub(crate) fn set_flag(&mut self, flag: Flag) {
+    pub fn set_flag(&mut self, flag: Flag) {
         self.flag = flag
     }
 
-    pub(crate) fn clone(&self) -> Self {
+    pub fn clone(&self) -> Self {
         Stream {
             id: self.id,
             conn: self.conn,
