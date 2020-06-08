@@ -66,6 +66,8 @@ pub enum ControlCommand {
     OpenStream(oneshot::Sender<Result<Stream, String>>),
     /// Open a new stream to the remote end.
     GetStream((u32, oneshot::Sender<Result<Stream, String>>)),
+    /// Open a new stream to the remote end.
+    SubscribeStream((u32, mpsc::Sender<Result<Stream, String>>)),
     /// Close the whole connection.
     CloseConnection(())
 }
@@ -483,7 +485,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 },
                 ReadState::Header{ref mut offset, ref mut buffer} => {
                     let mut read_buf = self.socket.read().await?;
-                    println!("header buffer:{:?}", buffer);
+                    println!("header buffer:{:?}", read_buf);
                     if read_buf.len() < (HEADER_SIZE-*offset) {
                         buffer[*offset..].copy_from_slice(read_buf.as_slice());
                         *offset += read_buf.len();
@@ -687,17 +689,13 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                    match res {
                        Some(ControlCommand::OpenStream(mut rx)) => {
                            let open_stream = self.open_secio_stream().await;
-                           if open_stream.is_ok() {
-                               rx.send(open_stream);
-                           } else {
-                               rx.send(Err("open stream fail".to_string()));
-                           }
+                           rx.send(open_stream);
+
                        },
                        Some(ControlCommand::GetStream((stream_id, mut rx))) => {
                            let stream = self.get_stream(stream_id);
-                           if stream.is_ok(){
-                               rx.send(stream);
-                           }
+                           rx.send(stream);
+
                        },
                        _ => (),
                    }
@@ -736,6 +734,20 @@ pub async fn get_stream(index:u32, mut sender: mpsc::Sender<ControlCommand>) -> 
     }
     Err("fail".to_string())
 }
+
+/// subscribe a new stream to the remote.
+pub async fn subscribe_stream(index:u32, mut sender: mpsc::Sender<ControlCommand>) -> Result<Stream, String> {
+    let (tx, mut rx) = mpsc::channel(10);
+    let res = sender.send(ControlCommand::SubscribeStream((index, tx))).await;
+    if let Ok(res) = res {
+        let res = rx.next().await;
+        if let Some(res) = res {
+            return res
+        }
+    }
+    Err("fail".to_string())
+}
+
 
 
 //#[test]
