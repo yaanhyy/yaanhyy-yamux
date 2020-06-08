@@ -288,6 +288,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 let mut stream_session_reader = (*stream).clone();
 
                 stream.data_sender = Some(data_sender);
+                stream.cache.clear();
                 stream_session_reader.data_receiver = Some(data_recerver);
                 Ok(stream_session_reader)
             } else {
@@ -704,6 +705,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                            let stream = self.get_stream(stream_id);
                            rx.send(stream);
 
+
                        },
                        _ => (),
                    }
@@ -846,6 +848,9 @@ pub async fn remote_stream_deal(mut sender: mpsc::Sender<ControlCommand>) {
     loop {
         let res = get_stream(2, sender.clone()).await;
         if let Ok(stream)= res{
+            if !stream.cache.is_empty(){
+                println!("get stream cache:{:?}", stream.cache);
+            }
             let mut data_receiver = stream.data_receiver.unwrap();
             task::spawn(async move {
                 loop {
