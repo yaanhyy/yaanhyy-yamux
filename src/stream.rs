@@ -101,7 +101,7 @@ impl Stream {
             sender: self.sender.clone(),
             cache: self.cache.clone(),
             data_receiver: None,
-            data_sender: None,
+            data_sender: self.data_sender.clone(),
             pending: None,
             flag: self.flag,
 
