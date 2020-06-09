@@ -113,7 +113,7 @@ pub struct RawSession<S> {
 
 
 pub struct SecioSessionWriter<S> {
-    pub socket: SecureHalfConnWrite<S>,
+    pub socket: Arc<Mutex<SecureHalfConnWrite<S>>>,
     pub stream_receiver: mpsc::Receiver<StreamCommand>,
 }
 
@@ -121,7 +121,7 @@ pub struct SecioSessionReader<S> {
     pub id: Id,
     pub mode: Mode,
     pub config: Arc<Config>,
-    pub socket: SecureHalfConnRead<S>,
+    pub socket: Arc<Mutex<SecureHalfConnRead<S>>>,
     pub stream_sender: mpsc::Sender<StreamCommand>,
     pub next_id: u32,
     pub streams: HashMap<u32, Stream>,
@@ -135,7 +135,7 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
     pub fn new(socket: SecureHalfConnWrite<S>, receiver: mpsc::Receiver<StreamCommand>) -> Self
     {
         SecioSessionWriter {
-            socket: socket,
+            socket: Arc::new(Mutex::new(socket)),
             stream_receiver: receiver
         }
     }
@@ -149,7 +149,7 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
         }
         println!("{}: sending initial {:?}", id.val(), frame.header());
         let header = encode(&frame.header);
-        self.socket.send(& mut header.to_vec()).await
+        (*self.socket.lock().await).send(& mut header.to_vec()).await
     }
 
     pub async fn data_frame_send(&mut self, stream: Stream, data: Vec<u8>) -> Result<(), String>{
@@ -162,8 +162,8 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
                 send_frame.header.syn();
             }
             let mut header = encode(&send_frame.header);
-            self.socket.send(& mut header.to_vec()).await?;
-            self.socket.send(& mut send_frame.body).await?;
+            (*self.socket.lock().await).send(& mut header.to_vec()).await?;
+            (*self.socket.lock().await).send(& mut send_frame.body).await?;
             return Ok(())
   //      }
         //Err("stream not founded".to_string())
@@ -172,9 +172,9 @@ impl <S: AsyncWrite + Send + Unpin + 'static>SecioSessionWriter<S> {
     pub async fn frame_send(&mut self, mut frame: Frame) -> Result<(), String>{
 
         let mut header = encode(&frame.header);
-        self.socket.send(& mut header.to_vec()).await?;
+        (*self.socket.lock().await).send(& mut header.to_vec()).await?;
         if !frame.body.is_empty() {
-            self.socket.send(&mut frame.body).await?;
+            (*self.socket.lock().await).send(&mut frame.body).await?;
         }
         return Ok(())
     }
@@ -212,7 +212,7 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
             id,
             mode,
             config: Arc::new(cfg),
-            socket,
+            socket: Arc::new(Mutex::new(socket)),
             streams: HashMap::new(),
             next_id: match mode {
                 Mode::Client => 1,
@@ -493,7 +493,8 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                     };
                 },
                 ReadState::Header{ref mut offset, ref mut buffer} => {
-                    let mut read_buf = self.socket.read().await?;
+                    let socket = self.socket.lock();
+                    let mut read_buf = (*socket.await).read().await?;
                     println!("header buffer:{:?}", read_buf);
                     if read_buf.len() < (HEADER_SIZE-*offset) {
                         buffer[*offset..].copy_from_slice(read_buf.as_slice());
@@ -540,7 +541,9 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                     }
                 }
                 ReadState::Body {ref header, ref mut offset, ref mut buffer} => {
-                    let mut read_buf = self.socket.read().await?;
+                    let socket = self.socket.lock();
+                    let mut read_buf = (*socket.await).read().await?;
+
                     if read_buf.len()  == (header.length  as usize - *offset) {
                         let h = header.clone();
                         buffer.append(& mut read_buf);
