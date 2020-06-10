@@ -11,7 +11,7 @@ use yaanhyy_secio::codec::{SecureHalfConnRead, SecureHalfConnWrite};
 use yaanhyy_secio::identity::Keypair;
 use yaanhyy_secio::config::SecioConfig;
 use yaanhyy_secio::handshake::handshake;
-use crate::io::ReadState;
+use crate::io::receive_frame;
 use futures::future::Future;
 use futures::{channel::{mpsc, oneshot}};
 use pin_utils::pin_mut;
@@ -128,7 +128,6 @@ pub struct SecioSessionReader<S> {
     pub streams: HashMap<u32, Stream>,
     pub garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
     pub shutdown: Shutdown,
-    pub state: ReadState,
     pub is_closed: bool,
 }
 
@@ -219,7 +218,6 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
                 Mode::Client => 1,
                 Mode::Server => 2
             },
-            state: ReadState::Init,
             garbage: Vec::new(),
             shutdown: Shutdown::NotStarted,
             is_closed: false,
@@ -522,85 +520,6 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
         Action::None
     }
 
-    pub async fn receive_frame(& mut self) -> Result<Frame ,String> {
-        loop {
-            match self.state {
-                ReadState::Init => {
-                    self.state = ReadState::Header {
-                        offset: 0,
-                        buffer: [0; header::HEADER_SIZE]
-                    };
-                },
-                ReadState::Header{ref mut offset, ref mut buffer} => {
-                    let socket = self.socket.lock();
-                    let mut read_buf = (*socket.await).read().await?;
-                    println!("header buffer:{:?}", read_buf);
-                    if read_buf.len() < (HEADER_SIZE-*offset) {
-                        buffer[*offset..].copy_from_slice(read_buf.as_slice());
-                        *offset += read_buf.len();
-                        continue;
-                    } else {
-                        let rest = read_buf.split_off(HEADER_SIZE-*offset);
-                        buffer[*offset..].copy_from_slice(read_buf.as_slice());
-
-                        let header = match decode(&buffer) {
-                            Ok(hd) => hd,
-                            Err(e) => return Err("decode header fail".to_string()),
-                        };
-                        println!("receice header:{:?}", header);
-                        match header.tag {
-                            Tag::Data => {
-                                let frame_len = header.length;
-                                let data_buf = vec![0; frame_len as usize];
-                                if rest.len() as u32 == frame_len {
-                                    self.state = ReadState::Init;
-                                    return Ok(Frame{header, body: rest});
-                                } else if (rest.len() as u32) < frame_len {
-                                    self.state = ReadState::Body { header, offset: rest.len(), buffer: rest};
-                                } else {
-                                    println!("have rest data in next frame");
-                                }
-                            },
-
-                            _ => {
-                                if !rest.is_empty() {
-//                                    let mut buf = [0; header::HEADER_SIZE];
-//                                    buf.copy_from_slice(rest.as_slice());
-//                                    self.state = ReadState::Header {
-//                                        offset: rest.len(),
-//                                        buffer: buf
-//                                    };
-                                    println!("have rest data in next frame");
-                                } else {
-                                    self.state = ReadState::Init;
-                                }
-                                return Ok(Frame::new(header));
-                            },
-                        }
-                    }
-                }
-                ReadState::Body {ref header, ref mut offset, ref mut buffer} => {
-                    let socket = self.socket.lock();
-                    let mut read_buf = (*socket.await).read().await?;
-
-                    if read_buf.len()  == (header.length  as usize - *offset) {
-                        let h = header.clone();
-                        buffer.append(& mut read_buf);
-                        let buffer_clone = buffer.clone();
-                        self.state = ReadState::Init;
-                        return Ok(Frame{header: h, body: (*buffer_clone).to_vec()});
-                    } else if read_buf.len() < (header.length  as usize - *offset) {
-                        *offset += read_buf.len();
-                        buffer.append(& mut read_buf);
-
-                    } else {
-                        println!("have rest data in next frame");
-                    }
-                }
-            }
-        }
-    }
-
     pub async fn on_frame(& mut self, frame: Frame) {
         let action = match frame.header.tag {
             Tag::Ping => {
@@ -701,12 +620,12 @@ impl <S: AsyncRead + Send + Unpin + 'static>SecioSessionReader<S> {
 
        //     let res = self.select_receive_deal(&control_receiver).await;
         let mut receiver = control_receiver.next();
-        let remote_frame_future = self.receive_frame();
-       //pin_mut!(remote_frame_future, receiver);
+        let remote_frame_future = receive_frame(self.socket.clone()).fuse();
+        pin_mut!(remote_frame_future, receiver);
 
         let res = select! {
         //select! {
-                         res = remote_frame_future.fuse() => {
+                         res = remote_frame_future => {
                              println!("received frame");
                              Either::Left(res)
 //                              if let Ok(frame) = res {
