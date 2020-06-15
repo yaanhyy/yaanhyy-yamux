@@ -15,5 +15,5 @@ futures = { version = "0.3.5" }
 log = "0.4.8"
 rand = "0.7.2"
 async-std = "1"
-yaanhyy-secio = { rev = '28ed08d58f2cc303b55cca99e2e5df9a6d734c4e', git = "https://github.com/yaanhyy/yaanhyy-secio.git"}
+yaanhyy-secio = { rev = '16421be27a37337526110c7f739b1c91d8414988', git = "https://github.com/yaanhyy/yaanhyy-secio.git"}
 pin-utils ="*"
