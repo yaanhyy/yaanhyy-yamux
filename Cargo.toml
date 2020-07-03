@@ -16,6 +16,4 @@ log = "0.4.8"
 rand = "0.7.2"
 async-std = "1"
 pin-utils ="*"
-
-[dev-dependencies]
 yaanhyy-secio = {git = "https://github.com/yaanhyy/yaanhyy-secio.git"}

@@ -1171,16 +1171,15 @@ dependencies = [
 
 [[package]]
 name = "ring"
-version = "0.16.14"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06b3fefa4f12272808f809a0af618501fdaba41a58963c5fb72238ab0be09603"
+checksum = "426bc186e3e95cac1e4a4be125a4aca7e84c2d616ffc02244eef36e2a60a093c"
 dependencies = [
  "cc",
+ "lazy_static",
  "libc",
- "once_cell",
  "spin",
  "untrusted",
- "web-sys",
  "winapi",
 ]
 
@@ -1433,9 +1432,9 @@ checksum = "f67332660eb59a6f1eb24ff1220c9e8d01738a8503c6002e30bcfe4bd9f2b4a9"
 
 [[package]]
 name = "untrusted"
-version = "0.7.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
+checksum = "55cd1f4b4e96b46aeb8d4855db4a7a9bd96eeeb5c6a1ab54593328761642ce2f"
 
 [[package]]
 name = "vcpkg"
@@ -1610,7 +1609,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "yaanhyy-secio"
 version = "0.1.0"
-source = "git+https://github.com/yaanhyy/yaanhyy-secio.git?rev=1a2aeff0358c9e6e6cb79730a75233aa4209a425#1a2aeff0358c9e6e6cb79730a75233aa4209a425"
+source = "git+https://github.com/yaanhyy/yaanhyy-secio.git#2547ba1fd9b9d392abe28f81a5285e4f5b2502ce"
 dependencies = [
  "aes-ctr",
  "asn1_der",
